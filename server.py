@@ -46,11 +46,29 @@ logger = logging.getLogger(__name__)
 
 
 PLAY = sync_playwright().start()
+
+CHATGPT_SESSION_TOKEN = os.environ.get('CHATGPT_SESSION_TOKEN', '')
+CHATGPT_HEADLESS_MODE = bool(CHATGPT_SESSION_TOKEN)
+
 BROWSER = PLAY.chromium.launch_persistent_context(
     user_data_dir="/tmp/playwright",
-    headless=False,
+    headless=CHATGPT_HEADLESS_MODE,
+    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
 )
+if CHATGPT_HEADLESS_MODE:
+    logger.info("running with a chatgpt token (headless mode)")
+    BROWSER.add_cookies(cookies=[
+        {
+            "path":     "/",
+            "secure":   True,
+            "httpOnly": True,
+            "value":    CHATGPT_SESSION_TOKEN,
+            "domain":   "chat.openai.com",
+            "name":     "__Secure-next-auth.session-token",
+        }
+    ])
 PAGE = BROWSER.new_page()
+PAGE.add_init_script('''window.localStorage.setItem('oai/apps/hasSeenOnboarding/chat', 'true')''')
 
 """Start the bot."""
 # Create the Application and pass it your bot's token.
@@ -224,11 +242,13 @@ I want you to only reply with the output inside and nothing else. Do no write ex
     else:
         await update.message.reply_text(response, parse_mode=telegram.constants.ParseMode.MARKDOWN_V2)
 
-@auth(USER_ID)
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
+    text = update.message.text
+    if text.startswith('/') and ' ' in text:
+        text = text.split(' ', 1)[1]
     # Send the message to OpenAI
-    send_message(update.message.text)
+    send_message(text)
     await check_loading(update)
     response = get_last_message()
     if "\[prompt:" in response:
@@ -253,11 +273,18 @@ async def check_loading(update):
 
 
 def start_browser():
-    PAGE.goto("https://chat.openai.com/")
+    res = PAGE.goto("https://chat.openai.com/")
     if not is_logged_in():
-        print("Please log in to OpenAI Chat")
-        print("Press enter when you're done")
-        input()
+        if CHATGPT_HEADLESS_MODE:
+            logger.info("%s", res)
+            logger.error("login failue: possibly invalid CHATGPT_SESSION_TOKEN")
+            logger.error("replace it with the value of `__Secure-next-auth.session-token` cookie")
+            input()
+            return
+        else:
+            print("Please log in to OpenAI Chat")
+            print("Press enter when you're done")
+            input()
     else:
 
         # on different commands - answer in Telegram
@@ -266,6 +293,8 @@ def start_browser():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("draw", draw))
         application.add_handler(CommandHandler("browse", browse))
+
+        application.add_handler(CommandHandler("chat", echo))
 
         # on non command i.e message - echo the message on Telegram
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
